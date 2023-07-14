@@ -50,7 +50,7 @@ def delete(name):
 def get_GMJI_data_firebase(name):
     lst = []
     store = []
-    for data in dbs.child(name).child('traces').get().val():
+    for data in dbs.child(name).child('traces').get():
         store.append(data)
          
     for datas in store:
@@ -61,7 +61,7 @@ def get_GMJI_data_firebase(name):
 def get_JAGI_data_firebase(name):
     lst = []
     store = []
-    for data in dbs.child(name).child('traces').get().val():
+    for data in dbs.child(name).child('traces').get():
         store.append(data)     
            
     for datas in store:
@@ -72,7 +72,7 @@ def get_JAGI_data_firebase(name):
 def get_PWJI_data_firebase(name):
     lst = []
     store = []
-    for data in dbs.child(name).child('traces').get().val():
+    for data in dbs.child(name).child('traces').get():
         store.append(data)
         
     for datas in store:

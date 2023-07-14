@@ -41,7 +41,7 @@ class ReactView(APIView):
             datas = read(f"storage/Jatim/{mseed}.mseed")
             serializer = MseedSerializer(data=request.data)
             if serializer.is_valid(raise_exception=True):
-                serializer.validated_data['name'] = "20100208_112154"
+                serializer.validated_data['name'] = mseed
                 gmji = []
                 jagi = []
                 pwji = []
