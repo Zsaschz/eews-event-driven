@@ -73,3 +73,33 @@ services:
       - "6379:6379"
     volumes:
       - ./redis_data:/data
+  
+  spark-master:
+    image: risw/spark-python:v-1
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+    volumes:
+      - ./data:/data
+
+  spark-worker-1:
+    image: risw/spark-python:v-1
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077 #ganti spark-master menjadi ip jika deploy secara terpisah
+    depends_on:
+      - spark-master #hapus jika deploy secara terpisah
+    volumes:
+      - ./data:/data
+
+  spark-worker-2:
+    image: risw/spark-python:v-1
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    depends_on:
+      - spark-master
+    volumes:
+      - ./data:/data

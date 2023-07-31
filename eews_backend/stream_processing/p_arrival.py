@@ -22,7 +22,7 @@ REDIS_HOST = os.getenv("REDIS_HOST")
 # Inisialisasi SparkSession
 spark = SparkSession \
     .builder \
-    .appName("KafkaStreamingApp") \
+    .appName("PArrival") \
     .getOrCreate()
 
 df = spark \
@@ -57,8 +57,6 @@ class PArrival:
         return True
 
     def process(self, row):
-        org = "eews"
-        bucket = "eews"
         measurement = "seismograf"
         station = row["station"]
         channel = row["channel"]
