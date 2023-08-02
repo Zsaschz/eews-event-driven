@@ -4,7 +4,7 @@ from pyspark.sql.types import StructType, StringType, FloatType, TimestampNTZTyp
 
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client import Point, WritePrecision, InfluxDBClient
-#import datetime, timedelta
+import datetime, timedelta
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 from kafka import KafkaProducer
 import json
@@ -18,6 +18,21 @@ INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_URL = os.getenv("INFLUXDB_URL")
 REDIS_HOST = os.getenv("REDIS_HOST")
+
+def nearest_datetime_rounded(datetime: datetime, step_in_micros: int = 40000):
+    microsecond = datetime.time().microsecond
+    remainder = microsecond % step_in_micros
+    rounded = datetime
+    if remainder < (step_in_micros / 2):
+        rounded -= timedelta(microseconds=remainder)
+    else:
+        rounded += timedelta(microseconds=(step_in_micros - remainder))
+    return rounded
+
+def normalizations(array):
+    # res = array/np.amax(np.abs(array))
+    res = array/100000
+    return res
 
 # Inisialisasi SparkSession
 spark = SparkSession \
@@ -61,43 +76,51 @@ class PArrival:
         station = row["station"]
         channel = row["channel"]
         time = row["time"]
-        '''
         # Konversi string menjadi objek waktu
         waktu_titik_saat_ini = datetime.strptime(time, "%Y-%m-%d %H:%M:%S.%f")
+        delta = 1/25
 
+        waktu_titik_saat_ini_konversi = nearest_datetime_rounded(waktu_titik_saat_ini, delta * 10**6)
+        waktu_titik_saat_ini_formatted = waktu_titik_saat_ini_konversi.strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4]+ "Z"
         # Kurangi 30 detik dari waktu awal
         waktu_titik_30s_lalu = waktu_titik_saat_ini - timedelta(seconds=30)
 
+        waktu_titik_30s_lalu_konversi = nearest_datetime_rounded(waktu_titik_30s_lalu, delta * 10**6)
+        waktu_titik_30s_lalu_formatted = waktu_titik_30s_lalu_konversi.strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4]+ "Z"
+
+
         query_api = self.client.query_api()
 
-        query = 'from(bucket:"' + bucket + '")\
-        |> range(start:'+ waktu_titik_30s_lalu +',stop:'+ waktu_titik_saat_ini +')\
+        query = 'from(bucket:"' + INFLUXDB_BUCKET + '")\
+        |> range(start:'+ waktu_titik_30s_lalu_formatted +',stop:'+ waktu_titik_saat_ini_formatted +')\
         |> filter(fn:(r) => r._measurement == "' + measurement + '")\
         |> filter(fn:(r) => r.station == "'+ station +'")\
         |> filter(fn:(r) => r.channel == "' + channel +'")\
         |> filter(fn:(r) => r._field == "data")'
 
-        result = query_api.query(org=org, query=query)
-        list_data = []
-        
-        for poin in result.get_points():
-            data = poin["field"]
-            list_data.append(data)
-        
-        sampling = 25
-        cft = recursive_sta_lta(list_data, int(2.5 * sampling), int(10. * sampling))
-        on_of = trigger_onset(cft, 3.3, 0.5)
-        '''
-        on_of = [1]
-        if len(on_of) > 0 :
-            # Buat objek koneksi ke server Redis
-            redis_client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=0)
-            p_arrival_flag = redis_client.hget(station,channel)
+        result = query_api.query(org=INFLUXDB_ORG, query=query)
+        if len(result)>0:  #sementara 0 dulu asumsi sudah diinterpolasi sehingga pasti ada 25*30 data
+            list_data = []
+            
+            for table in result:
+                for value in table.records:
+                    norm = normalizations(value.values["_value"])
+                    list_data.append(norm)
+            
+            sampling = 25
+            cft = recursive_sta_lta(list_data, int(2.5 * sampling), int(10. * sampling))
+            on_of = trigger_onset(cft, 3.3, 0.5)
 
-            if p_arrival_flag == None :
-                redis_client.hset(station,'channel',channel)
-                redis_client.expire(station, 10)
-                self.find_p_arrival(station,time, channel)
+            #on_of = [1]
+            if len(on_of) > 0 :
+                # Buat objek koneksi ke server Redis
+                redis_client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=0)
+                p_arrival_flag = redis_client.hget(station,channel)
+
+                if p_arrival_flag == None :
+                    redis_client.hset(station,'channel',channel)
+                    redis_client.expire(station, 10)
+                    self.find_p_arrival(station,time, channel)
 
     def close(self, error):
         self.write_api.__del__()
