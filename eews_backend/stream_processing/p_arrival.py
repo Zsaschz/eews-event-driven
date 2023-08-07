@@ -1,25 +1,18 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json
-from pyspark.sql.types import StructType, StringType, FloatType, TimestampNTZType, StructField, IntegerType
+from pyspark.sql.types import StructType, StringType, FloatType
 
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client import Point, WritePrecision, InfluxDBClient
-from datetime import datetime, timedelta
-from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 from kafka import KafkaProducer
+from topics import PREPROCESSED_TOPIC, P_ARRIVAL_TOPIC,MONITOR_P_ARRIVAL_TOPIC
+from utils import *
+
 import json
 import redis
-#from topics import PREPROCESSED_TOPIC, P_ARRIVAL_TOPIC
-from dateutil import parser
 import time
 
-import yaml  # atau pustaka lain untuk membaca file konfigurasi
-
-def load_config(file_path):
-    with open(file_path, "r") as config_file:
-        config = yaml.load(config_file, Loader=yaml.FullLoader)
-    return config
-config = load_config("config.yaml")
+config = load_config_yaml("config.yaml")
 
 BOOTSTRAP_SERVER = config["BOOTSTRAP_SERVER"]
 INFLUXDB_ORG = config["INFLUXDB_ORG"]
@@ -27,25 +20,6 @@ INFLUXDB_BUCKET = config["INFLUXDB_BUCKET"]
 INFLUXDB_TOKEN = config["INFLUXDB_TOKEN"]
 INFLUXDB_URL = config["INFLUXDB_URL"]
 REDIS_HOST = config["REDIS_HOST"]
-MONITOR_TOPIC = "monitor_p_arrival"
-PREPROCESSED_TOPIC = 'preprocessed'
-P_ARRIVAL_TOPIC = 'p-arrival'
-PREDICTION_TOPIC = 'prediction'
-
-def nearest_datetime_rounded(datetime: datetime, step_in_micros: int = 40000):
-    microsecond = datetime.time().microsecond
-    remainder = microsecond % step_in_micros
-    rounded = datetime
-    if remainder < (step_in_micros / 2):
-        rounded -= timedelta(microseconds=remainder)
-    else:
-        rounded += timedelta(microseconds=(step_in_micros - remainder))
-    return rounded
-
-def normalizations(array):
-    # res = array/np.amax(np.abs(array))
-    res = array/100000
-    return res
 
 # Inisialisasi SparkSession
 spark = SparkSession \
@@ -88,15 +62,9 @@ class PArrival:
         measurement = "seismograf"
         station = row["station"]
         channel = row["channel"]
-        now = row["time"]
+        now = row["time"] #UTC String
         
-        #Mencari waktu 30 detik yang lalu
-        past_30s = parser.parse(now) - timedelta(seconds=30)
-        # Menghapus offset zona waktu
-        past_30s_no_offset = past_30s.replace(tzinfo=None)
-        # Format kembali dalam format yang diinginkan
-        output_format = '%Y-%m-%dT%H:%M:%S.%fZ'
-        past_30s_format = past_30s_no_offset.strftime(output_format)
+        past_30s_format = search_past_time_seconds(now,30)
 
         query_api = self.client.query_api()
 
@@ -122,16 +90,13 @@ class PArrival:
             
             sampling = 25
             start_hitung_p_arrival = time.monotonic_ns()
-
-            #Algortima mencari P_arrival
-            cft = recursive_sta_lta(list_data, int(2.5 * sampling), int(10. * sampling))
-            on_of = trigger_onset(cft, 3.3, 0.5)
-
+            search_p_arrival = search_Parrival(list_data, sampling)
             waktu_hitung_p_arrival = (time.monotonic_ns() - start_hitung_p_arrival) / 10**9
+            
             self.monitor(station,channel,now,waktu_query,waktu_hitung_p_arrival, len(list_data))
 
-            on_of = [1] #untuk testing produce topic p-arrival
-            if len(on_of) > 0 :
+            search_p_arrival = [1] #untuk testing produce topic p-arrival
+            if len(search_p_arrival) > 0 :
                 # Buat objek koneksi ke server Redis
                 redis_client = redis.StrictRedis(host='172.17.0.1', port=6379, db=0)
                 p_arrival_flag = redis_client.hget(station,"channel")
@@ -155,19 +120,20 @@ class PArrival:
                     'banyak_data': banyak_data}
         # Konversi JSON ke bytes
         value = json.dumps(json_data).encode('utf-8')
+
         self.producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVER)
-        self.producer.send(MONITOR_TOPIC, value=value)
+        self.producer.send(MONITOR_P_ARRIVAL_TOPIC, value=value)
         self.producer.flush()
 
     def find_p_arrival(self,station,time_data,channel):
+        point = Point("p_arrival").time(time_data, write_precision=WritePrecision.MS).tag("channel", channel).tag("station", station).field("time_data", time_data)
+        self.write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+        
         json_data = {'station': station,
                     'time': time_data}
         # Konversi JSON ke bytes
         value = json.dumps(json_data).encode('utf-8')
-
-        point = Point("p_arrival").time(time_data, write_precision=WritePrecision.MS).tag("channel", channel).tag("station", station).field("time_data", time_data)
-        self.write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
-
+        
         self.producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVER)
         self.producer.send(P_ARRIVAL_TOPIC, value=value)
         self.producer.flush()
