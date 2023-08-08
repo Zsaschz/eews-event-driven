@@ -90,6 +90,8 @@ class PArrival:
                     redis_client.expire(station, 1)
                 else :
                     redis_client.delete(station)
+                    #sudah menemukan 4 p arrival berturut-turut
+                    self.find_p_arrival(station,now,channel,data)
             else :
                 redis_client.delete(station)
 
