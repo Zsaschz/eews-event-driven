@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json
-from pyspark.sql.types import StructType, StringType, FloatType
+from pyspark.sql.types import StructType, StringType, FloatType, ArrayType, IntegerType
 
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client import Point, WritePrecision, InfluxDBClient
@@ -34,12 +34,14 @@ df = spark \
     .option("subscribe", PREPROCESSED_TOPIC) \
     .load()
 
+innerArrayType = ArrayType(IntegerType())
+outerArrayType = ArrayType(innerArrayType)
 # Skema JSON
 schema = StructType() \
         .add("station", StringType()) \
         .add("channel", StringType()) \
         .add("time", StringType()) \
-        .add("data", FloatType())
+        .add("data", outerArrayType)
 
 # Parse JSON
 df_listen = df.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)") \
@@ -59,63 +61,47 @@ class PArrival:
         return True
 
     def process(self, row):
-        measurement = "seismograf"
         station = row["station"]
         channel = row["channel"]
         now = row["time"] #UTC String
+        data = row["data"]
         
-        past_30s_format = search_past_time_seconds(now,30)
-
-        query_api = self.client.query_api()
-
-        start = time.monotonic_ns()
-
-        query = 'from(bucket:"' + INFLUXDB_BUCKET + '")\
-        |> range(start:'+ past_30s_format +',stop:'+ now +')\
-        |> filter(fn:(r) => r._measurement == "' + measurement + '")\
-        |> filter(fn:(r) => r.station == "'+ station +'")\
-        |> filter(fn:(r) => r.channel == "' + channel +'")\
-        |> filter(fn:(r) => r._field == "data")'
-
-        result = query_api.query(org=INFLUXDB_ORG, query=query)
-        waktu_query = (time.monotonic_ns() - start) / 10**9
-
-        if len(result)>0:  #sementara 0 dulu asumsi sudah diinterpolasi sehingga pasti ada 25*30 data
-            list_data = []
+        #anggap data sudah bersih
+        sampling = 25
+        start_hitung_p_arrival = time.monotonic_ns()
+        search_p_arrival = get_Parrival(data[0],data[1],data[2], sampling)
+        waktu_hitung_p_arrival = (time.monotonic_ns() - start_hitung_p_arrival) / 10**9
             
-            for table in result:
-                for value in table.records:
-                    norm = normalizations(value.values["_value"])
-                    list_data.append(norm)
-            
-            sampling = 25
-            start_hitung_p_arrival = time.monotonic_ns()
-            search_p_arrival = search_Parrival(list_data, sampling)
-            waktu_hitung_p_arrival = (time.monotonic_ns() - start_hitung_p_arrival) / 10**9
-            
-            self.monitor(station,channel,now,waktu_query,waktu_hitung_p_arrival, len(list_data))
+        self.monitor(station,channel,now,waktu_hitung_p_arrival)
 
-            search_p_arrival = [1] #untuk testing produce topic p-arrival
+        redis_client = redis.StrictRedis(host='REDIS_HOST', port=6379, db=0)
+        p_arrival_flag = redis_client.hget(station,"p_arrival")
+        search_p_arrival = [1] #untuk testing produce topic p-arrival
+
+        #Mengecek deteksi P arrival 4 kali berturut-turut
+        if p_arrival_flag == None :
             if len(search_p_arrival) > 0 :
-                # Buat objek koneksi ke server Redis
-                redis_client = redis.StrictRedis(host='172.17.0.1', port=6379, db=0)
-                p_arrival_flag = redis_client.hget(station,"channel")
-
-                if p_arrival_flag == None :
-                    redis_client.hset(station,'channel',channel)
-                    redis_client.expire(station, 10)
-                    self.find_p_arrival(station,now, channel)
+                redis_client.hset(station,'p_arrival',1)
+                redis_client.expire(station, 1)
+        else :
+            if len(search_p_arrival) > 0 :
+                if p_arrival_flag < 3 :
+                    redis_client.hset(station,'p_arrival',p_arrival_flag + 1)
+                    redis_client.expire(station, 1)
+                else :
+                    redis_client.delete(station)
+            else :
+                redis_client.delete(station)
 
     def close(self, error):
         self.write_api.__del__()
         self.client.__del__()
         print("Closed with error: %s" % str(error))
 
-    def monitor(self,station,channel,time_data,waktu_query,waktu_hitung_p_arrival,banyak_data):
+    def monitor(self,station,channel,time_data,waktu_hitung_p_arrival,banyak_data):
         json_data = {'station':station,
                      'channel':channel,
                      'time_data':time_data,
-                    'waktu_query':waktu_query,
                     'waktu_hitung_p_arrival':waktu_hitung_p_arrival,
                     'banyak_data': banyak_data}
         # Konversi JSON ke bytes
@@ -125,12 +111,13 @@ class PArrival:
         self.producer.send(MONITOR_P_ARRIVAL_TOPIC, value=value)
         self.producer.flush()
 
-    def find_p_arrival(self,station,time_data,channel):
+    def find_p_arrival(self,station,time_data,channel,data):
         point = Point("p_arrival").time(time_data, write_precision=WritePrecision.MS).tag("channel", channel).tag("station", station).field("time_data", time_data)
         self.write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
         
         json_data = {'station': station,
-                    'time': time_data}
+                    'time': time_data,
+                    'data': data}
         # Konversi JSON ke bytes
         value = json.dumps(json_data).encode('utf-8')
         
