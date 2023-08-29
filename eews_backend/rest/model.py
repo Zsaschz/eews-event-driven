@@ -1,15 +1,15 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict
-        
-class UpdateStationModel(BaseModel):
+
+class Location(BaseModel):
+    coordinates: list[float] | None = [None, None]
+    type: Literal['Point']
+
+class StationModel(BaseModel):
     name: str = Field()
     description: Optional[str] = Field()
-    x: float = Field()
-    y: float = Field()
-    
-class StationModel(UpdateStationModel):
-    closest_stations: List[str] = Field()
-    
+    location: Location
+
 class MSeedData(BaseModel):
     network: Optional[str] = Field()
     station: Optional[str] = Field()
@@ -21,9 +21,9 @@ class MSeedData(BaseModel):
     delta: Optional[float] = Field()
     npts: Optional[int] = Field()
     calib: Optional[float] = Field()
-    data: Optional[str]= Field()
-    
+    data: Optional[str] = Field()
+
+
 class MSeed(BaseModel):
     name: str = Field()
     traces: Optional[List[MSeedData]] = Field()
-    

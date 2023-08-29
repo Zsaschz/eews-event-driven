@@ -1,20 +1,33 @@
-from datetime import timedelta
+from datetime import timedelta, timezone
+import random
+from dateutil import parser
 from math import ceil
+import uuid
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect,  status, UploadFile, BackgroundTasks
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+    UploadFile,
+    BackgroundTasks,
+)
 from fastapi.params import Body
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from influxdb_client.client.flux_table import TableList, FluxRecord
 from typing import Dict, List
 from influxdb_client import Point, WritePrecision
-from obspy import read
+from obspy import Stream, Trace, read
+from pprint import pprint
 from logging.config import dictConfig
 
-from database.mongodb import *
-from database.influxdb import *
-from stream_processing.schema import *
-from stream_processing.kafka import KafkaProducer, BOOTSTRAP_SERVER
-from stream_processing.topics import PREPROCESSED_TOPIC
+from database.mongodb import mongo_client
+from database.influxdb import influx_client
+from stream import KafkaProducer, KafkaConsumer, PREPROCESSED_TOPIC, RAW_TOPIC
 from utils import *
 from .model import *
 from .websocket import ConnectionManager
@@ -25,19 +38,42 @@ import haversine as hs
 import time
 import asyncio
 import pandas as pd
-
-MODULE_DIR = "./rest/"
-STATIC_DIR = "static/"
+import io
+import os
+import json
 
 load_dotenv()
 dictConfig(logging_config)
 
+MODULE_DIR = "./rest/"
+STATIC_DIR = "static/"
+SIMULATE_REALTIME = False if os.getenv("SIMULATE_REALTIME") == "False" else True
+MSEED_RANGE_IN_SECONDS = 30
+
+origins = [
+    "http://localhost",
+    "http://localhost:3000",
+]
+
 app = FastAPI()
 log = logging.getLogger("rest")
-app.mount("/static", StaticFiles(directory=f"{MODULE_DIR}{STATIC_DIR}"), name="static")
 
-producer = KafkaProducer(PREPROCESSED_TOPIC)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+log.info(f"{SIMULATE_REALTIME=}")
+
 manager = ConnectionManager()
+# consumer = KafkaConsumer(RAW_TOPIC, uuid.uuid4())
+producer = KafkaProducer(PREPROCESSED_TOPIC)
+_, db = mongo_client()
+client = influx_client()
 
 HTML = """
 <!DOCTYPE html>
@@ -75,66 +111,207 @@ HTML = """
     </body>
 </html>
 """
+
+
+# @threaded
+# def listen(consumer: KafkaConsumer, manager: ConnectionManager):
+#     log.info("Listening for messages")
+#     try:
+#         consumer.consume(on_message=lambda message: manager.broadcast(message))
+#     except Exception as e:
+#         log.error(e)
+
+
+# @app.on_event("startup")
+# async def startup_event():
+#     try:
+#         listen(consumer, manager)
+#     except Exception as e:
+#         log.error(e)
+
+
+@app.get("/post", status_code=201)
+async def post():
+    pass
+    # data = {
+    #     "lat": random.uniform(5.626791, -9),
+    #     "long": random.uniform(95.429725, 140.884050),
+    #     "depth": 8889.901495235445,
+    #     "magnitude": 42.41240072250366,
+    #     "time": 1548.9176885528566,
+    #     "p-arrival": parser.parse("2015-08-20T15:11:00.000Z"),
+    #     "expired": parser.parse("2015-08-20T15:12:00.000Z"),
+    #     "station": "ABJI",
+    # }
+    # print(data)
+    # await db["prediction"].insert_one(data)
+
+    # time = datetime(2015, 8, 20, 15, 11, 47, tzinfo=timezone.utc)
+    # records = []
+    # with client.write_api() as writer:
+    #     for i in range(10):
+    #         records.append(
+    #             Point("p_arrival")
+    #             .time(time + timedelta(seconds=i), write_precision=WritePrecision.S)
+    #             .tag("station", "KHK")
+    #             .field("time_data", (time + timedelta(seconds=i)).isoformat())
+    #         )
+    #     print(records)
+    #     writer.write(bucket="eews", record=records)
+
+
 @app.get("/test")
 async def test():
     query_api = client.query_api()
-    now = datetime(2015,8,20,15,12,1)
+    now = datetime(2015, 8, 20, 15, 11, 47, tzinfo=timezone.utc)
     query = f"""
-    from(bucket: "eews") 
-        |> range(start: {(now - timedelta(seconds=1)).isoformat()}Z, stop: {now.isoformat()}Z) 
-        |> filter(fn: (r) => r["_measurement"] == "seismograf") 
-        |> pivot(rowKey: ["_time"], columnKey: ["channel", "station"], valueColumn: "_value")"""
-    data: pd.DataFrame = query_api.query_data_frame(query=query)
-    # data = data.drop(columns=["_start", "_stop", "_field", "_measurement", "result", "table"])
-    # log.debug(data.columns)
-    # log.debug(data.head(50))
-    data = data.fillna(0)
-    return data.to_dict() 
+            from(bucket: "eews") 
+                |> range(start: {(now - timedelta(seconds=1)).isoformat()}, stop: {now.isoformat()}) 
+                |> filter(fn: (r) => r["_measurement"] == "p_arrival" or r["_measurement"] == "seismograf")"""
+    data: TableList = query_api.query(query=query)
+    result = {}
+    for records in data:
+        row: FluxRecord
+        for row in records:
+            station = row.values["station"]
+            _time = row.values["_time"]
+
+            current_station = result.get(
+                station, {"BHE": [], "BHN": [], "BHZ": [], "p_arrival": []}
+            )
+
+            if row.values["_measurement"] == "seismograf":
+                channel = row.values["channel"]
+                data = row.values["_value"]
+                current_channel = current_station[channel]
+                current_channel.append(
+                    {
+                        "time": _time.isoformat(),
+                        "data": data,
+                    }
+                )
+                current_station[channel] = current_channel
+                result[station] = current_station
+
+            elif row.values["_measurement"] == "p_arrival":
+                current_station["p_arrival"].append(_time.isoformat())
+                result[station] = current_station
+
+    prediction = (
+        await db["prediction"]
+        .find(
+            {
+                "p-arrival": {"$lte": now - timedelta(seconds=1)},
+                "expired": {"$gte": now},
+            }
+        )
+        .to_list(1000000000)
+    )
+    for p in prediction:
+        del p["_id"]
+
+    print(now - timedelta(seconds=1))
+    print(now)
+    return {"data": result, "prediction": prediction}
+    # return extended_data.to_dict()
 
 
 @app.get("/")
 async def get():
     return HTMLResponse(HTML)
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         query_api = client.query_api()
-        now = datetime.now()
-        now = datetime(2015,8,20,15,12,1)
+        now = datetime(2015, 8, 20, 15, 11, 47, tzinfo=timezone.utc)
+        if SIMULATE_REALTIME:
+            now = datetime.now(tz=timezone.utc) - timedelta(
+                seconds=MSEED_RANGE_IN_SECONDS
+            )
         while True:
-            await asyncio.sleep(1)
+            start = time.monotonic_ns()
             query = f"""
             from(bucket: "eews") 
-                |> range(start: {(now - timedelta(seconds=1)).isoformat()}Z, stop: {now.isoformat()}Z) 
-                |> filter(fn: (r) => r["_measurement"] == "seismograf") 
-                |> pivot(rowKey: ["_time"], columnKey: ["channel", "station"], valueColumn: "_value")"""
-            data: pd.DataFrame = query_api.query_data_frame(query=query)
-            log.debug(data)
-            json_data = data.to_json()
+                |> range(start: {(now - timedelta(seconds=1)).isoformat()}, stop: {now.isoformat()}) 
+                |> filter(fn: (r) => r["_measurement"] == "p_arrival" or r["_measurement"] == "seismograf")"""
+            data: TableList = query_api.query(query=query)
+            result = {}
+            for records in data:
+                row: FluxRecord
+                for row in records:
+                    station = row.values["station"]
+                    _time = row.values["_time"]
+
+                    current_station = result.get(
+                        station, {"BHE": [], "BHN": [], "BHZ": [], "p_arrival": []}
+                    )
+
+                    if row.values["_measurement"] == "seismograf":
+                        channel = row.values["channel"]
+                        data = row.values["_value"]
+                        current_channel = current_station[channel]
+                        current_channel.append(
+                            {
+                                "time": _time.isoformat(),
+                                "data": data,
+                            }
+                        )
+                        current_station[channel] = current_channel
+                        result[station] = current_station
+
+                    elif row.values["_measurement"] == "p_arrival":
+                        current_station["p_arrival"].append(_time.isoformat())
+                        result[station] = current_station
+
+            prediction = (
+                await db["prediction"]
+                .find(
+                    {
+                        "p-arrival": {"$lte": now - timedelta(seconds=1)},
+                        "expired": {"$gte": now},
+                    }
+                )
+                .to_list(1000000000)
+            )
+            for p in prediction:
+                del p["_id"]
+                del p["p-arrival"]
+                del p["expired"]
+
+            json_data = json.dumps({"data": result, "prediction": prediction})
             now += timedelta(seconds=1)
             await manager.broadcast(json_data)
-    except WebSocketDisconnect:
+            diff = (time.monotonic_ns() - start) / 10**9
+            await asyncio.sleep(1 - diff)
+    except Exception as e:
+        log.error(e)
+        log.warning(f"Client {websocket} has been disconnected")
         manager.disconnect(websocket)
+
 
 @app.get("/station", response_model=List[StationModel])
 async def list_seismometer():
     list_data = await db["station"].find().to_list(1000000000)
-    log.info(list_data)
     return list_data
+
 
 @app.get("/station/{name}", response_model=StationModel)
 async def get_seismometer(name: str):
     data = await db["station"].find_one({"name": name})
     if data is not None:
         return data
-    raise HTTPException(status_code=404, detail=f"Seismometer with name {name} not found")
+    raise HTTPException(
+        status_code=404, detail=f"Seismometer with name {name} not found"
+    )
+
 
 @app.put("/station/{name}", response_model=StationModel)
-async def update_seismometer(name: str, background_task: BackgroundTasks, data: UpdateStationModel = Body(...)):
+async def update_seismometer(name: str, data: StationModel = Body(...)):
     data = data.model_dump()
-    
+
     if len(data) >= 1:
         update_result = await db["station"].update_one({"name": name}, {"$set": data})
 
@@ -142,147 +319,138 @@ async def update_seismometer(name: str, background_task: BackgroundTasks, data: 
             if (
                 updated_data := await db["station"].find_one({"name": name})
             ) is not None:
-                background_task.add_task(adjust_closest_stations)
                 return updated_data
 
     if (existing_data := await db["station"].find_one({"name": name})) is not None:
-        await adjust_closest_stations()
         return existing_data
 
-    raise HTTPException(status_code=404, detail=f"Seismometer with name {name} not found")
+    raise HTTPException(
+        status_code=404, detail=f"Seismometer with name {name} not found"
+    )
+
 
 @app.post("/station", response_model=StationModel, status_code=status.HTTP_201_CREATED)
-async def create_seismometer(background_task: BackgroundTasks, data: UpdateStationModel = Body(...)):
+async def create_seismometer(data: StationModel = Body(...)):
     data = data.model_dump()
-    if (existing_data := await db["station"].find_one({"name": data["name"]})) is not None:
-        raise HTTPException(status_code=400, detail=f"Seismometer with name {data['name']} already exists")
-    
-    all_stations = await db["station"].find().to_list(1000000000)
-    calculated = dict()
-    
-    data["closest_stations"] = calculate_closest_station(data, all_stations, calculated)
-    
+    if (
+        existing_data := await db["station"].find_one({"name": data["name"]})
+    ) is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Seismometer with name {data['name']} already exists",
+        )
+
     new_data = await db["station"].insert_one(data)
-    if (existing_data := await db["station"].find_one({"_id": new_data.inserted_id})) is not None:
-        await adjust_closest_stations()
+    if (
+        existing_data := await db["station"].find_one({"_id": new_data.inserted_id})
+    ) is not None:
         return existing_data
 
+
 @app.delete("/station/{name}")
-async def delete_seismometer(name: str, background_task: BackgroundTasks):
+async def delete_seismometer(name: str):
     delete_result = await db["station"].delete_one({"name": name})
 
     if delete_result.deleted_count == 1:
-        await adjust_closest_stations()
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    raise HTTPException(status_code=404, detail=f"Seismometer with name {name} not found")
+    raise HTTPException(
+        status_code=404, detail=f"Seismometer with name {name} not found"
+    )
+
 
 @app.post("/mseed", status_code=status.HTTP_201_CREATED)
 async def upload_mseed(file: UploadFile, background_tasks: BackgroundTasks):
     filename = file.filename
+    log.debug(f"Received mseed with name {filename}")
     contents = await file.read()
     background_tasks.add_task(save_mseed, contents, filename)
     return {"file_size": file.size, "filename": filename}
 
-@measure_execution_time
-async def adjust_closest_stations(all_stations = None):
-    log.info("Adjusting closest stations")
-    if not all_stations:
-        all_stations = await db["station"].find().to_list(1000000000)
-
-    calculated = dict()
-    
-    for station in all_stations:
-        station["closest_stations"] = calculate_closest_station(station, all_stations, calculated)
-        await db["station"].update_one({"name": station["name"]}, {"$set": station})
-        
-def calculate_closest_station(curr_station: List[Dict], all_stations: List[Dict], calculated: Dict = None):
-    distances = []
-    
-    for other_station in all_stations:
-        if other_station['name'] == curr_station["name"]:
-            continue
-        distance = float("inf")
-        if f"{other_station['name']}-{curr_station['name']}" in calculated:
-            distance = calculated[f"{other_station['name']}-{curr_station['name']}"]
-        else:
-            distance = hs.haversine((curr_station['x'], curr_station['y']), (other_station['x'], other_station['y']))
-            calculated[f"{curr_station['name']}-{other_station['name']}"] = distance
-        distances.append((other_station['name'], distance))
-    
-    distances.sort(key=lambda x: x[1])
-    return [i[0] for i in distances[:3]]
 
 @measure_execution_time
 def save_mseed(contents: bytes, filename: str):
     log.info("Saving mseed on the background")
-    filepath = f"{MODULE_DIR}{STATIC_DIR}{filename}"
-    with open(filepath, "wb") as f:
-        f.write(contents)
-        
-    records = []
-    events = []
-    traces = process_data(filepath)
-    start = time.monotonic_ns()
-    for mseed_data in traces:
-        starttime: datetime = UTCDateTime(mseed_data['starttime']).datetime
-        endtime = UTCDateTime(mseed_data['endtime']).datetime
-        delta = 1/int(mseed_data['sampling_rate'])
-        channel = mseed_data["channel"]
-        station = mseed_data["station"]
-        first_starttime = nearest_datetime_rounded(starttime, delta * 10**6)
-        
-        log.debug(f"Processing {station}_{channel} from {filename} with len {len(mseed_data['data_interpolated'])}")
-        
-        for data_point in mseed_data['data_interpolated']: 
-            point = Point("seismograf").time(first_starttime, write_precision=WritePrecision.MS).tag("channel", channel).tag("station", station).field("data", data_point)
-            records.append(point)      
-            event = {
-                "station": station,
-                "channel": channel,
-                "time": str(starttime),
-                "data": data_point
-            }
-            events.append(event)
-            first_starttime += timedelta(seconds=delta)
-    
-    with InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG) as client:
-        with client.write_api() as writer:
-            log.debug("Start batch save to InfluxDB")
-            writer.write(bucket="eews", record=records)
-    
-    log.debug("Start producing events")
-    for i in range(len(events)):    
-        producer.produce_message(events[i])
-    
-    log.debug(f"Finished process mseed with {len(records)} data for {(time.monotonic_ns() - start) / 10**9}s with rate of {len(records)/((time.monotonic_ns() - start) / 10**9)}")
+    st = read(io.BytesIO(contents))
+
+    log.debug(f"Stream {st}")
+
+    if len(st) > 0:
+        first_starttime = min([trace.stats["starttime"] for trace in st])
+        first_endtime = min([trace.stats["endtime"] for trace in st])
+
+        processed = process_data(st)
+        produce_windowed_data(processed, first_starttime, first_endtime)
+        save_to_influx(st)
+
 
 @measure_execution_time
-def process_data(mseed_filename: str):
-    mseed_data = read(mseed_filename)
-    traces = []
+def produce_windowed_data(stream: Stream, first_starttime, first_endtime):
+    rounded_starttime = nearest_datetime_rounded(first_starttime, 0.04 * 10**6)
+    dt = UTCDateTime(rounded_starttime)
+
+    log.info("Producing windowed events to kafka")
+
+    while dt + 8 <= first_endtime:
+        trimmed = stream.slice(dt, dt + 8, keep_empty_traces=True)
+        if len(trimmed) > 0:
+            event = {
+                "station": trimmed[0].stats["station"],
+            }
+            for detail in trimmed:
+                event[detail.stats["channel"]] = {
+                    "starttime": str(detail.stats.starttime),
+                    "endtime": str(detail.stats.endtime),
+                    "data": detail.data.tolist(),
+                }
+            producer.produce_message(event, event["station"])
+        dt += 0.04
+    return dt
+
+
+@measure_execution_time
+def save_to_influx(stream: Stream):
+    trace: Trace
+    records = []
+    for trace in stream:
+        starttime: datetime = UTCDateTime(trace.stats.starttime).datetime
+        delta = 1 / int(trace.stats.sampling_rate)
+        channel = trace.stats.channel
+        station = trace.stats.station
+        starttime = nearest_datetime_rounded(starttime, delta * 10**6)
+
+        for data_point in trace.data:
+            point = (
+                Point("seismograf")
+                .time(starttime, write_precision=WritePrecision.MS)
+                .tag("channel", channel)
+                .tag("station", station)
+                .field("data", data_point)
+            )
+            records.append(point)
+            starttime += timedelta(seconds=delta)
+
+    with client.write_api() as writer:
+        log.info(f"Start batch save of {len(records)} data to InfluxDB")
+        writer.write(bucket="eews", record=records)
+
+
+@measure_execution_time
+def process_data(stream: Stream):
+    mseed_data = stream
+    new_stream = Stream()
+    detail: Trace
     for detail in mseed_data:
-        preprocessed = {}
+        trace = detail.copy()
         fs = detail.stats.sampling_rate
         lowcut = 1.0
         highcut = 5.0
         order = 5
-        preprocessed['network'] = detail.stats.network
-        preprocessed['station'] = detail.stats.station
-        preprocessed['channel'] = detail.stats.channel
-        preprocessed['location'] = detail.stats.location
-        preprocessed['starttime'] = str(detail.stats.starttime)
-        preprocessed['endtime'] = str(detail.stats.endtime)
-        preprocessed['delta'] = detail.stats.delta
-        preprocessed['npts'] = detail.stats.npts
-        preprocessed['calib'] = detail.stats.calib
-        preprocessed['data'] = detail.data
         data_before = detail.data
         data_processed = butter_bandpass_filter(data_before, lowcut, highcut, fs, order)
-        data_to = list(data_processed)
-        data_to = letInterpolate(data_to, int(ceil(len(data_to)*25/detail.stats.sampling_rate)))
-        preprocessed['sampling_rate'] = 25.0
-        preprocessed['data_interpolated'] = data_to
-        traces.append(preprocessed)
-    return traces
- 
+        trace.data = data_processed
+        trace.interpolate(25)
+        trace.stats["delta"] = 1 / 25
+        trace.stats["sampling_rate"] = 25
+        new_stream.append(trace)
+    return new_stream

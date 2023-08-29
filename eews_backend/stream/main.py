@@ -4,7 +4,7 @@ from confluent_kafka import Consumer, Producer
 from confluent_kafka import KafkaError
 from confluent_kafka import Message
 from utils.helper_functions import get_current_utc_datetime
-from typing import Dict
+from typing import Any, Dict
 from typing import Optional
 import logging
 import os
@@ -17,14 +17,14 @@ if not BOOTSTRAP_SERVER:
     raise Exception("BOOTSTRAP_SERVER env is required")
 
 DEFAULT_CONSUMER_CONFIG = {
-    'bootstrap.servers': BOOTSTRAP_SERVER,
-    'default.topic.config': {
-        'auto.offset.reset': 'latest', # if there's no initial offset, use latest
+    "bootstrap.servers": BOOTSTRAP_SERVER,
+    "default.topic.config": {
+        "auto.offset.reset": "latest",  # if there's no initial offset, use latest
     },
 }
 
 DEFAULT_PRODUCER_CONFIG = {
-    'bootstrap.servers': BOOTSTRAP_SERVER,
+    "bootstrap.servers": BOOTSTRAP_SERVER,
     # 'compression.type': 'lz4',
     # 'linger.ms': 100,
     # 'batch.size': 131072, # 128 KB
@@ -33,17 +33,19 @@ DEFAULT_PRODUCER_CONFIG = {
 logging.debug(f"Consumer config: {DEFAULT_CONSUMER_CONFIG}")
 logging.info(f"Producer config: {DEFAULT_PRODUCER_CONFIG}")
 
+
 def serialize_json(obj):
-    return json.dumps(obj).encode('utf-8')
+    return json.dumps(obj).encode("utf-8")
 
 
 def deserialize_json(obj: bytes):
-    decoded = obj.decode('utf-8')
+    decoded = obj.decode("utf-8")
     try:
         return json.loads(decoded)
 
     except:
         return decoded
+
 
 class KafkaProducer:
     def __init__(
@@ -69,6 +71,7 @@ class KafkaProducer:
     def produce_message(
         self,
         value: object,
+        key: Optional[Any] = None,
         callback_function: Optional[Callable[[str, str], None]] = None,
     ):
         value[f"injected_to_{self.topic_name}_at"] = get_current_utc_datetime()
@@ -77,18 +80,25 @@ class KafkaProducer:
             topic=self.topic_name,
             value=self.value_serializer(value),
             on_delivery=self.get_on_delivery_function(callback_function),
+            key=key,
         )
 
         self.producer.poll(0)
 
     def log_on_kafka_message_delivery(self, error: Optional[str], message: str):
         if error is not None:
-            logging.error(f"Failed to produce message: {message.value()}, topic: {self.topic_name} error: {error}")
+            logging.error(
+                f"Failed to produce message: {message.value()}, topic: {self.topic_name} error: {error}"
+            )
 
         else:
-            logging.debug(f"Successfully produced message: {message.value()}, topic: {self.topic_name}")
+            logging.debug(
+                f"Successfully produced message: {message.value()}, topic: {self.topic_name}"
+            )
 
-    def get_on_delivery_function(self, extra_function: Optional[Callable[[str, str], None]]):
+    def get_on_delivery_function(
+        self, extra_function: Optional[Callable[[str, str], None]]
+    ):
         if extra_function is None:
             return self.log_on_kafka_message_delivery
 
@@ -97,8 +107,8 @@ class KafkaProducer:
             extra_function(error, message),
         )
 
-class KafkaConsumer:
 
+class KafkaConsumer:
     def __init__(
         self,
         topic_name: str,
@@ -106,11 +116,13 @@ class KafkaConsumer:
         extra_config: Dict,
         value_deserializer: Optional[Callable[[object], bytes]] = None,
     ):
-        self.consumer = Consumer({
-            **DEFAULT_CONSUMER_CONFIG,
-            "group.id": group_id,
-            **extra_config,
-        })
+        self.consumer = Consumer(
+            {
+                **DEFAULT_CONSUMER_CONFIG,
+                "group.id": group_id,
+                **extra_config,
+            }
+        )
         self.consumer.subscribe([topic_name])
 
         self.value_deserializer = value_deserializer

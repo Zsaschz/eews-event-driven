@@ -1,5 +1,5 @@
 from influxdb_client.client.write_api import SYNCHRONOUS
-from influxdb_client import InfluxDBClient, WriteOptions
+from influxdb_client import InfluxDBClient
 from dotenv import load_dotenv
 import os
 
@@ -12,8 +12,6 @@ INFLUXDB_PASSWORD = os.getenv("INFLUXDB_PASSWORD")
 INFLUXDB_URL = os.getenv("INFLUXDB_URL")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 
-client = InfluxDBClient(
-   url=INFLUXDB_URL,
-   org=INFLUXDB_ORG,
-   token=INFLUXDB_TOKEN
-)
+
+def influx_client():
+    return InfluxDBClient(url=INFLUXDB_URL, org=INFLUXDB_ORG, token=INFLUXDB_TOKEN)
