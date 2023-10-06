@@ -2,9 +2,10 @@ from scipy.signal import butter, filtfilt, lfilter
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 from obspy import UTCDateTime
 from datetime import datetime, timedelta
-from pprint import pprint
+from dateutil import parser
 import numpy as np
 import pytz
+import yaml
 
 def normalizations(array):
     # res = array/np.amax(np.abs(array))
@@ -150,3 +151,17 @@ def nearest_datetime_rounded(datetime: datetime, step_in_micros: int = 40000):
     else:
         rounded += timedelta(microseconds=(step_in_micros - remainder))
     return rounded
+
+def load_config_yaml(file_path):
+    with open(file_path, "r") as config_file:
+        config = yaml.load(config_file, Loader=yaml.FullLoader)
+    return config
+
+def search_past_time_seconds(now,time_second):
+    past = parser.parse(now) - timedelta(seconds=time_second)
+    # Menghapus offset zona waktu
+    past_no_offset = past.replace(tzinfo=None)
+    # Format kembali dalam format yang diinginkan
+    output_format = '%Y-%m-%dT%H:%M:%S.%fZ'
+    past_format = past_no_offset.strftime(output_format)
+    return past_format
