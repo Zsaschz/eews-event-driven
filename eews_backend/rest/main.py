@@ -49,10 +49,13 @@ MODULE_DIR = "./rest/"
 STATIC_DIR = "static/"
 SIMULATE_REALTIME = False if os.getenv("SIMULATE_REALTIME") == "False" else True
 MSEED_RANGE_IN_SECONDS = 30
+BACKEND_IP = os.getenv("BACKEND_IP") if os.getenv("BACKEND_IP") else "localhost"
 
 origins = [
+    "http://host.docker.internal",
     "http://localhost",
     "http://localhost:3000",
+    f"http://{BACKEND_IP}"
 ]
 
 app = FastAPI()
@@ -75,7 +78,7 @@ producer = KafkaProducer(PREPROCESSED_TOPIC)
 _, db = mongo_client()
 client = influx_client()
 
-HTML = """
+HTML = f"""
 <!DOCTYPE html>
 <html>
     <head>
@@ -90,7 +93,7 @@ HTML = """
         <ul id='messages'>
         </ul>
         <script>
-            var ws = new WebSocket("ws://localhost:8000/ws");
+            var ws = new WebSocket("ws://{BACKEND_IP}:80/ws"); """ + """
             ws.onmessage = function(event) {
                 var messages = document.getElementById('messages')
                 var message = document.createElement('li')
@@ -226,7 +229,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         query_api = client.query_api()
-        now = datetime(2015, 8, 20, 15, 11, 47, tzinfo=timezone.utc)
+        now = datetime(2023, 10, 9, 2, 18, 19, tzinfo=timezone.utc) # Date for simulation purposes
         if SIMULATE_REALTIME:
             now = datetime.now(tz=timezone.utc) - timedelta(
                 seconds=MSEED_RANGE_IN_SECONDS
@@ -235,7 +238,7 @@ async def websocket_endpoint(websocket: WebSocket):
             start = time.monotonic_ns()
             query = f"""
             from(bucket: "eews") 
-                |> range(start: {(now - timedelta(seconds=1)).isoformat()}, stop: {now.isoformat()}) 
+                |> range(start: {(now - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}, stop: {now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}) 
                 |> filter(fn: (r) => r["_measurement"] == "p_arrival" or r["_measurement"] == "seismograf")"""
             data: TableList = query_api.query(query=query)
             result = {}

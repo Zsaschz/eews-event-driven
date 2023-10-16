@@ -46,8 +46,8 @@ const Map = (props) => {
       jsonData.forEach((element) => {
         L.marker(
           [
-            element["location"]["coordinates"][0],
-            element["location"]["coordinates"][1],
+            element["location"]["coordinates"][1], // latitude
+            element["location"]["coordinates"][0], // longitude
           ],
           { icon: customMarkerIcon(element["name"]) }
         )

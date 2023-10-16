@@ -10,15 +10,16 @@ import About from "./pages/About";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 
 const App = () => {
+  var api = process.env.NODE_ENV == 'production'? process.env.REACT_APP_API : 'localhost';
   return (
     <Router>
       <Navibar />
       <Routes>
-        <Route exact path="/" element={<AdminMap url={"localhost:8000"} />} />
+        <Route exact path="/" element={<AdminMap url={api} />} />
         <Route path="/about" element={<About />} />
         <Route
           path="/admin-map"
-          element={<AdminMap url={"localhost:8000"} />}
+          element={<AdminMap url={api} />}
         />
         <Route path="/login" element={<LogIn />} />
         <Route path="/help" element={<Help />} />

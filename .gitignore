@@ -26,6 +26,7 @@ db.sqlite3
 
 # production
 /build
+/nginx/cert
 
 # misc
 .DS_Store
