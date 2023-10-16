@@ -1,0 +1,87 @@
+version: "3.3"
+
+services:
+  zookeeper:
+    restart: always
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    image: confluentinc/cp-zookeeper:latest
+    ports:
+      - "2181:2181/tcp"
+    volumes:
+      - ./zookeeper/data:/data
+      - ./zookeeper/data/datalog:/datalog
+
+  kafka:
+    restart: always
+    environment:
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://34.128.127.171:9092
+      KAFKA_BROKER_ID: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_JMX_HOSTNAME: 34.128.127.171
+      KAFKA_JMX_PORT: 9999
+    image: confluentinc/cp-kafka:latest
+    user: root
+    ports:
+      - "9092:9092"
+      - "9999:9999"
+    volumes:
+      - ./kafka/data/kafka-1:/var/lib/kafka/data
+    depends_on:
+      - zookeeper
+
+  kafka-2:
+    restart: always
+    environment:
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29092,PLAINTEXT_HOST://34.128.127.171:9093
+      KAFKA_BROKER_ID: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_JMX_HOSTNAME: 34.128.127.171
+      KAFKA_JMX_PORT: 9999
+    image: confluentinc/cp-kafka:latest
+    user: root
+    ports:
+      - "9093:9093"
+      - "9998:9999"
+    volumes:
+      - ./kafka/data/kafka-2:/var/lib/kafka/data
+    depends_on:
+      - zookeeper
+
+  kafka-3:
+    restart: always
+    environment:
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29092,PLAINTEXT_HOST://34.128.127.171:9094
+      KAFKA_BROKER_ID: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_JMX_HOSTNAME: 34.128.127.171
+      KAFKA_JMX_PORT: 9999
+    image: confluentinc/cp-kafka:latest
+    user: root
+    ports:
+      - "9094:9094"
+      - "9997:9999"
+    volumes:
+      - ./kafka/data/kafka-3:/var/lib/kafka/data
+    depends_on:
+      - zookeeper
+      - ./cassandra-sink/kafka-connect/plugins:/data/connectors
+
+  # Utility
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    container_name: kafka-ui
+    ports:
+      - "9080:8080"
+    restart: always
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: PLAINTEXT://kafka:29092,PLAINTEXT://kafka-2:29092,PLAINTEXT://kafka-3:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://kafka-schema-registry:8081/
